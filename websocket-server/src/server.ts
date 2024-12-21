@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import { IncomingMessage } from "http";
 import dotenv from "dotenv";
@@ -6,6 +6,7 @@ import http from "http";
 import { readFileSync } from "fs";
 import { join } from "path";
 import cors from "cors";
+import twilio from "twilio";
 import {
   handleCallConnection,
   handleFrontendConnection,
@@ -16,34 +17,75 @@ dotenv.config();
 
 const PORT = parseInt(process.env.PORT || "8081", 10);
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
+
+if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
+  console.error("Missing required Twilio environment variables");
+  process.exit(1);
+}
+
+// Initialize Twilio client
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 const app = express();
 app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // needed for call-making
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
-
-app.use(express.urlencoded({ extended: false }));
 
 const twimlPath = join(__dirname, "twiml.xml");
 const twimlTemplate = readFileSync(twimlPath, "utf-8");
 
-app.get("/public-url", (req, res) => {
+const getPublicUrl = (req: Request, res: Response) => {
   res.json({ publicUrl: PUBLIC_URL });
-});
+};
 
-app.all("/twiml", (req, res) => {
+const handleTwiml = (req: Request, res: Response) => {
   const wsUrl = new URL(PUBLIC_URL);
   wsUrl.protocol = "wss:";
   wsUrl.pathname = `/call`;
 
   const twimlContent = twimlTemplate.replace("{{WS_URL}}", wsUrl.toString());
   res.type("text/xml").send(twimlContent);
-});
+};
 
-// New endpoint to list available tools (schemas)
-app.get("/tools", (req, res) => {
+const makeCall = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { phoneNumber } = req.body;
+
+    if (!phoneNumber) {
+      res.status(400).json({ error: "Phone number is required" });
+      return;
+    }
+
+    const call = await twilioClient.calls.create({
+      url: `${PUBLIC_URL}/twiml`,
+      to: phoneNumber,
+      from: TWILIO_PHONE_NUMBER,
+    });
+
+    res.json({ success: true, callSid: call.sid });
+  } catch (error: any) {
+    console.error("Error making call:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message || "Failed to make call",
+    });
+  }
+};
+
+const getTools = (req: Request, res: Response) => {
   res.json(functions.map((f) => f.schema));
-});
+};
+
+app.get("/public-url", getPublicUrl);
+app.all("/twiml", handleTwiml);
+app.post("/make-call", makeCall);
+app.get("/tools", getTools);
 
 let currentCall: WebSocket | null = null;
 let currentLogs: WebSocket | null = null;
